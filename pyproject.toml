@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-gateway"
+version = "0.1.0"
+description = "HTTP gateway that exposes OpenAI and Anthropic-compatible APIs backed by Claude Code subprocesses"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiohttp>=3.9,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.23,<1",
+]
+
+[project.scripts]
+claude-gateway = "claude_gateway.server:main"
+
+[tool.setuptools.packages.find]
+include = ["claude_gateway", "claude_gateway.*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
