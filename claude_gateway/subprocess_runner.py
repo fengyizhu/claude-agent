@@ -44,6 +44,7 @@ class ClaudeCodeRunner:
             self.claude_bin,
             *self.claude_args,
             "-p",
+            "--verbose",
             "--output-format",
             "stream-json",
             "--include-partial-messages",

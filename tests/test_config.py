@@ -20,6 +20,7 @@ def test_runner_build_command_includes_extra_args(tmp_path):
         "claude",
         "--dangerously-skip-permissions",
         "-p",
+        "--verbose",
         "--output-format",
         "stream-json",
         "--include-partial-messages",
