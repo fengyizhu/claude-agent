@@ -22,6 +22,7 @@ from claude_gateway.protocols import (
     normalize_messages,
     openai_error,
     usage_zero,
+    with_history,
 )
 from claude_gateway.session_store import SessionStore
 from claude_gateway.subprocess_runner import ClaudeCodeRunner, RunResult
@@ -55,6 +56,7 @@ class ClaudeGatewayServer:
             timeout_seconds=config.request_timeout_seconds,
         )
         self.semaphore = asyncio.Semaphore(max(1, config.max_concurrent_runs))
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     def create_app(self) -> web.Application:
         app = web.Application(
@@ -147,6 +149,7 @@ class ClaudeGatewayServer:
         provided = (
             request.headers.get("X-Claude-Gateway-Session-Id", "").strip()
             or request.headers.get("X-Hermes-Session-Id", "").strip()
+            or str(normalized.raw.get("session_id") or "").strip()
         )
         if provided:
             return provided[:256]
@@ -156,6 +159,44 @@ class ClaudeGatewayServer:
                 first_user = msg.get("content", first_user)
                 break
         return self.sessions.derive_session_id(normalized.system_prompt, first_user)
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
+
+    @staticmethod
+    def _session_options(normalized: NormalizedRequest) -> dict[str, Any]:
+        raw_session = normalized.raw.get("session")
+        return raw_session if isinstance(raw_session, dict) else {}
+
+    def _restore_session_history(self, session_id: str, normalized: NormalizedRequest) -> tuple[NormalizedRequest, dict[str, Any]]:
+        options = self._session_options(normalized)
+        mode = str(options.get("mode") or "resume").strip().lower()
+        if mode == "reset" or options.get("reset") is True:
+            self.sessions.delete(session_id)
+            return normalized, {"session_resumed": False, "history_messages_used": len(normalized.history), "session_mode": "reset"}
+        if mode == "stateless":
+            return normalized, {"session_resumed": False, "history_messages_used": len(normalized.history), "session_mode": "stateless"}
+
+        max_history = options.get("max_history_messages", 40)
+        try:
+            max_history_int = max(0, min(200, int(max_history)))
+        except (TypeError, ValueError):
+            max_history_int = 40
+        stored_history = self.sessions.history(session_id, limit=max_history_int)
+        if not stored_history:
+            return normalized, {"session_resumed": False, "history_messages_used": len(normalized.history), "session_mode": "resume"}
+        restored = with_history(normalized, stored_history + normalized.history)
+        return restored, {
+            "session_resumed": True,
+            "history_messages_used": len(restored.history),
+            "restored_history_messages": len(stored_history),
+            "request_history_messages": len(normalized.history),
+            "session_mode": "resume",
+        }
 
     @staticmethod
     def _session_headers(session_id: str, request_id: str) -> dict[str, str]:
@@ -208,31 +249,33 @@ class ClaudeGatewayServer:
             return web.json_response(openai_error(exc.message, param=exc.param, code=exc.code), status=400)
         session_id = self._session_id_for(request, normalized)
         request_id = f"req_{uuid.uuid4().hex}"
-        if normalized.stream:
-            return await self._stream_chat_completion(request, normalized, session_id, request_id)
-        prompt = build_prompt(normalized, session_id=session_id)
-        result = await self._run_with_limit(prompt)
-        if result is None:
-            return web.json_response(openai_error("Too many concurrent runs", code="rate_limit_exceeded"), status=429)
-        self._record_session(session_id, normalized, result)
-        status = 200 if result.completed or result.final_text else 502
-        finish_reason = "stop" if result.completed else "error"
-        response = {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": normalized.model,
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": result.final_text},
-                "finish_reason": finish_reason,
-            }],
-            "usage": self._openai_usage(result),
-            "claude_gateway": self._gateway_metadata(session_id, result),
-        }
-        if not result.completed:
-            response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
-        return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
+        async with self._session_lock(session_id):
+            normalized, session_meta = self._restore_session_history(session_id, normalized)
+            if normalized.stream:
+                return await self._stream_chat_completion(request, normalized, session_id, request_id, session_meta)
+            prompt = build_prompt(normalized, session_id=session_id)
+            result = await self._run_with_limit(prompt)
+            if result is None:
+                return web.json_response(openai_error("Too many concurrent runs", code="rate_limit_exceeded"), status=429)
+            self._record_session(session_id, normalized, result)
+            status = 200 if result.completed or result.final_text else 502
+            finish_reason = "stop" if result.completed else "error"
+            response = {
+                "id": f"chatcmpl-{uuid.uuid4().hex[:29]}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": normalized.model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": result.final_text},
+                    "finish_reason": finish_reason,
+                }],
+                "usage": self._openai_usage(result),
+                "claude_gateway": self._gateway_metadata(session_id, result, session_meta),
+            }
+            if not result.completed:
+                response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
+            return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
 
     async def handle_messages(self, request: web.Request) -> web.StreamResponse:
         auth_err = self._check_auth(request, anthropic=True)
@@ -248,30 +291,32 @@ class ClaudeGatewayServer:
             return web.json_response(anthropic_error(exc.message), status=400)
         session_id = self._session_id_for(request, normalized)
         request_id = f"req_{uuid.uuid4().hex}"
-        if normalized.stream:
-            return await self._stream_messages(request, normalized, session_id, request_id)
-        prompt = build_prompt(normalized, session_id=session_id)
-        result = await self._run_with_limit(prompt)
-        if result is None:
-            return web.json_response(anthropic_error("Too many concurrent runs", err_type="rate_limit_error"), status=429)
-        self._record_session(session_id, normalized, result)
-        status = 200 if result.completed or result.final_text else 529
-        response = {
-            "id": f"msg_{uuid.uuid4().hex[:24]}",
-            "type": "message",
-            "role": "assistant",
-            "model": normalized.model,
-            "content": [{"type": "text", "text": result.final_text}],
-            "stop_reason": "end_turn" if result.completed else "error",
-            "stop_sequence": None,
-            "usage": {"input_tokens": int((result.usage or {}).get("input_tokens", 0) or 0), "output_tokens": int((result.usage or {}).get("output_tokens", 0) or 0)},
-            "claude_gateway": self._gateway_metadata(session_id, result),
-        }
-        if not result.completed:
-            response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
-        return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
+        async with self._session_lock(session_id):
+            normalized, session_meta = self._restore_session_history(session_id, normalized)
+            if normalized.stream:
+                return await self._stream_messages(request, normalized, session_id, request_id, session_meta)
+            prompt = build_prompt(normalized, session_id=session_id)
+            result = await self._run_with_limit(prompt)
+            if result is None:
+                return web.json_response(anthropic_error("Too many concurrent runs", err_type="rate_limit_error"), status=429)
+            self._record_session(session_id, normalized, result)
+            status = 200 if result.completed or result.final_text else 529
+            response = {
+                "id": f"msg_{uuid.uuid4().hex[:24]}",
+                "type": "message",
+                "role": "assistant",
+                "model": normalized.model,
+                "content": [{"type": "text", "text": result.final_text}],
+                "stop_reason": "end_turn" if result.completed else "error",
+                "stop_sequence": None,
+                "usage": {"input_tokens": int((result.usage or {}).get("input_tokens", 0) or 0), "output_tokens": int((result.usage or {}).get("output_tokens", 0) or 0)},
+                "claude_gateway": self._gateway_metadata(session_id, result, session_meta),
+            }
+            if not result.completed:
+                response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
+            return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
 
-    async def _stream_chat_completion(self, request: web.Request, normalized: NormalizedRequest, session_id: str, request_id: str) -> web.StreamResponse:
+    async def _stream_chat_completion(self, request: web.Request, normalized: NormalizedRequest, session_id: str, request_id: str, session_meta: dict[str, Any] | None = None) -> web.StreamResponse:
         if self.semaphore.locked() and getattr(self.semaphore, "_value", 0) <= 0:
             return web.json_response(openai_error("Too many concurrent runs", code="rate_limit_exceeded"), status=429)
         await self.semaphore.acquire()
@@ -298,7 +343,7 @@ class ClaudeGatewayServer:
                 final_result = RunResult("".join(final_text_parts), 0, "", 0.0, True)
             self._record_session(session_id, normalized, final_result)
             finish = "stop" if final_result.completed else "error"
-            finish_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": normalized.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": self._openai_usage(final_result), "claude_gateway": self._gateway_metadata(session_id, final_result)}
+            finish_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": normalized.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": self._openai_usage(final_result), "claude_gateway": self._gateway_metadata(session_id, final_result, session_meta)}
             await response.write(f"data: {json_dumps(finish_chunk)}\n\n".encode("utf-8"))
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, asyncio.CancelledError):
@@ -307,7 +352,7 @@ class ClaudeGatewayServer:
             self.semaphore.release()
         return response
 
-    async def _stream_messages(self, request: web.Request, normalized: NormalizedRequest, session_id: str, request_id: str) -> web.StreamResponse:
+    async def _stream_messages(self, request: web.Request, normalized: NormalizedRequest, session_id: str, request_id: str, session_meta: dict[str, Any] | None = None) -> web.StreamResponse:
         if self.semaphore.locked() and getattr(self.semaphore, "_value", 0) <= 0:
             return web.json_response(anthropic_error("Too many concurrent runs", err_type="rate_limit_error"), status=429)
         await self.semaphore.acquire()
@@ -319,7 +364,7 @@ class ClaudeGatewayServer:
         final_result: RunResult | None = None
         final_text_parts: list[str] = []
         try:
-            await self._write_event(response, "message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": normalized.model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}, "metadata": {"session_id": session_id}}})
+            await self._write_event(response, "message_start", {"type": "message_start", "message": {"id": message_id, "type": "message", "role": "assistant", "model": normalized.model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}, "metadata": {"session_id": session_id, **(session_meta or {})}}})
             await self._write_event(response, "content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
             prompt = build_prompt(normalized, session_id=session_id)
             async for item in self.runner.stream(prompt):
@@ -332,7 +377,7 @@ class ClaudeGatewayServer:
                 final_result = RunResult("".join(final_text_parts), 0, "", 0.0, True)
             self._record_session(session_id, normalized, final_result)
             await self._write_event(response, "content_block_stop", {"type": "content_block_stop", "index": 0})
-            await self._write_event(response, "message_delta", {"type": "message_delta", "delta": {"stop_reason": final_result.stop_reason or ("end_turn" if final_result.completed else "error"), "stop_sequence": None}, "usage": {"output_tokens": int((final_result.usage or {}).get("output_tokens", 0) or 0)}, "claude_gateway": self._gateway_metadata(session_id, final_result)})
+            await self._write_event(response, "message_delta", {"type": "message_delta", "delta": {"stop_reason": final_result.stop_reason or ("end_turn" if final_result.completed else "error"), "stop_sequence": None}, "usage": {"output_tokens": int((final_result.usage or {}).get("output_tokens", 0) or 0)}, "claude_gateway": self._gateway_metadata(session_id, final_result, session_meta)})
             await self._write_event(response, "message_stop", {"type": "message_stop"})
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, asyncio.CancelledError):
             raise
@@ -361,11 +406,13 @@ class ClaudeGatewayServer:
         }
 
     @classmethod
-    def _gateway_metadata(cls, session_id: str, result: RunResult | None = None) -> dict[str, Any]:
+    def _gateway_metadata(cls, session_id: str, result: RunResult | None = None, session_meta: dict[str, Any] | None = None) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "session_id": session_id,
             "cache": cls._cache_usage(result),
         }
+        if session_meta:
+            metadata.update(session_meta)
         if result and result.session_id:
             metadata["claude_code_session_id"] = result.session_id
         if result and result.stop_reason:

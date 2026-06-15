@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 _TRUE_REQUEST_BOOL_STRINGS = frozenset({"1", "true", "yes", "on"})
@@ -172,6 +172,10 @@ def normalize_messages(body: dict[str, Any], default_model: str) -> NormalizedRe
         stream=coerce_request_bool(body.get("stream"), default=False),
         raw=body,
     )
+
+
+def with_history(request: NormalizedRequest, history: list[dict[str, str]]) -> NormalizedRequest:
+    return replace(request, history=history)
 
 
 def build_prompt(request: NormalizedRequest, *, session_id: str | None = None) -> str:

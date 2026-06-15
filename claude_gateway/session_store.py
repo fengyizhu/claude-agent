@@ -48,6 +48,28 @@ class SessionStore:
             metadata=dict(data.get("metadata") or {}),
         )
 
+    def history(self, session_id: str, *, limit: int = 40) -> list[dict[str, str]]:
+        record = self.get(session_id)
+        if record is None:
+            return []
+        history: list[dict[str, str]] = []
+        for msg in record.messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            content = msg.get("content")
+            if role in {"user", "assistant"} and isinstance(content, str) and content:
+                history.append({"role": role, "content": content})
+        return history[-limit:]
+
+    def delete(self, session_id: str) -> bool:
+        path = self._path(session_id)
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
     def upsert(
         self,
         session_id: str,
