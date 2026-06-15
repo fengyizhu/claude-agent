@@ -10,6 +10,12 @@ def test_load_config_parses_claude_args(monkeypatch):
     assert config.claude_args == ("--dangerously-skip-permissions", "--model", "opus")
 
 
+def test_load_config_parses_debug(monkeypatch):
+    monkeypatch.setenv("CLAUDE_GATEWAY_DEBUG", "1")
+    config = load_config({"allow_no_auth": True})
+    assert config.debug is True
+
+
 def test_runner_build_command_includes_extra_args(tmp_path):
     runner = ClaudeCodeRunner(
         claude_bin="claude",

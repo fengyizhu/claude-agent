@@ -29,8 +29,7 @@ async def test_messages_non_stream(client, auth_headers):
     assert data["role"] == "assistant"
     assert data["content"][0]["type"] == "text"
     assert "hello" in data["content"][0]["text"]
-    assert data["claude_gateway"]["cache"]["cache_read_input_tokens"] == 4
-    assert data["claude_gateway"]["cache"]["cache_creation_input_tokens"] == 1
+    assert "claude_gateway" not in data
 
 
 async def test_messages_unsupported_content(client, auth_headers):

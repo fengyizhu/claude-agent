@@ -249,6 +249,14 @@ class ClaudeGatewayServer:
             return web.json_response(openai_error(exc.message, param=exc.param, code=exc.code), status=400)
         session_id = self._session_id_for(request, normalized)
         request_id = f"req_{uuid.uuid4().hex}"
+        logger.debug(
+            "chat completion request request_id=%s session_id=%s stream=%s model=%s history_messages=%s",
+            request_id,
+            session_id,
+            normalized.stream,
+            normalized.model,
+            len(normalized.history),
+        )
         async with self._session_lock(session_id):
             normalized, session_meta = self._restore_session_history(session_id, normalized)
             if normalized.stream:
@@ -271,10 +279,9 @@ class ClaudeGatewayServer:
                     "finish_reason": finish_reason,
                 }],
                 "usage": self._openai_usage(result),
-                "claude_gateway": self._gateway_metadata(session_id, result, session_meta),
             }
             if not result.completed:
-                response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
+                response["error"] = {"message": result.error or "Claude Code run failed", "type": "server_error", "code": "claude_code_error"}
             return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
 
     async def handle_messages(self, request: web.Request) -> web.StreamResponse:
@@ -291,6 +298,14 @@ class ClaudeGatewayServer:
             return web.json_response(anthropic_error(exc.message), status=400)
         session_id = self._session_id_for(request, normalized)
         request_id = f"req_{uuid.uuid4().hex}"
+        logger.debug(
+            "messages request request_id=%s session_id=%s stream=%s model=%s history_messages=%s",
+            request_id,
+            session_id,
+            normalized.stream,
+            normalized.model,
+            len(normalized.history),
+        )
         async with self._session_lock(session_id):
             normalized, session_meta = self._restore_session_history(session_id, normalized)
             if normalized.stream:
@@ -310,10 +325,9 @@ class ClaudeGatewayServer:
                 "stop_reason": "end_turn" if result.completed else "error",
                 "stop_sequence": None,
                 "usage": {"input_tokens": int((result.usage or {}).get("input_tokens", 0) or 0), "output_tokens": int((result.usage or {}).get("output_tokens", 0) or 0)},
-                "claude_gateway": self._gateway_metadata(session_id, result, session_meta),
             }
             if not result.completed:
-                response["claude_gateway"].update({"error": result.error, "exit_code": result.exit_code})
+                response["error"] = {"type": "api_error", "message": result.error or "Claude Code run failed"}
             return web.json_response(response, status=status, headers=self._session_headers(session_id, request_id))
 
     async def _stream_chat_completion(self, request: web.Request, normalized: NormalizedRequest, session_id: str, request_id: str, session_meta: dict[str, Any] | None = None) -> web.StreamResponse:
@@ -343,7 +357,7 @@ class ClaudeGatewayServer:
                 final_result = RunResult("".join(final_text_parts), 0, "", 0.0, True)
             self._record_session(session_id, normalized, final_result)
             finish = "stop" if final_result.completed else "error"
-            finish_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": normalized.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": self._openai_usage(final_result), "claude_gateway": self._gateway_metadata(session_id, final_result, session_meta)}
+            finish_chunk = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": normalized.model, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": self._openai_usage(final_result)}
             await response.write(f"data: {json_dumps(finish_chunk)}\n\n".encode("utf-8"))
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, asyncio.CancelledError):
@@ -447,8 +461,27 @@ def create_app(config: GatewayConfig | None = None) -> web.Application:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
     config = load_config()
+    log_level = logging.DEBUG if config.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.debug:
+        logger.debug("debug logging enabled")
+        logger.debug(
+            "gateway config host=%s port=%s model=%s workdir=%s sessions_dir=%s claude_bin=%s claude_args=%s timeout=%s max_concurrent_runs=%s max_request_bytes=%s",
+            config.host,
+            config.port,
+            config.model_name,
+            config.workdir,
+            config.sessions_dir,
+            config.claude_bin,
+            config.claude_args,
+            config.request_timeout_seconds,
+            config.max_concurrent_runs,
+            config.max_request_bytes,
+        )
     if not config.can_start_without_auth:
         raise SystemExit("CLAUDE_GATEWAY_API_KEY is required unless CLAUDE_GATEWAY_ALLOW_NO_AUTH=1")
     app = create_app(config)

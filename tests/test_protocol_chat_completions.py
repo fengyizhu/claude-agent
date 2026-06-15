@@ -30,8 +30,7 @@ async def test_chat_completions_non_stream(client, auth_headers):
     assert data["object"] == "chat.completion"
     assert data["choices"][0]["message"]["role"] == "assistant"
     assert "hello" in data["choices"][0]["message"]["content"]
-    assert data["claude_gateway"]["cache"]["cache_read_input_tokens"] == 4
-    assert data["claude_gateway"]["cache"]["cache_creation_input_tokens"] == 1
+    assert "claude_gateway" not in data
     assert resp.headers["X-Claude-Gateway-Session-Id"]
 
 

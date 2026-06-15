@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -233,8 +237,15 @@ class ClaudeCodeRunner:
 
     async def _start(self, prompt: str) -> asyncio.subprocess.Process:
         self.workdir.mkdir(parents=True, exist_ok=True)
+        command = self.build_command(prompt)
+        logger.debug(
+            "starting Claude Code subprocess cwd=%s command=%s prompt_chars=%s",
+            self.workdir,
+            command[:-1] + ["<prompt>"],
+            len(prompt),
+        )
         return await asyncio.create_subprocess_exec(
-            *self.build_command(prompt),
+            *command,
             cwd=str(self.workdir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

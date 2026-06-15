@@ -67,6 +67,7 @@ class GatewayConfig:
     port: int = DEFAULT_PORT
     api_key: str = ""
     allow_no_auth: bool = False
+    debug: bool = False
     cors_origins: tuple[str, ...] = field(default_factory=tuple)
     model_name: str = DEFAULT_MODEL_NAME
     claude_bin: str = "claude"
@@ -99,6 +100,7 @@ def load_config(overrides: dict[str, Any] | None = None) -> GatewayConfig:
         port=int(overrides.get("port") or _int_env("CLAUDE_GATEWAY_PORT", DEFAULT_PORT)),
         api_key=str(overrides.get("api_key") or os.getenv("CLAUDE_GATEWAY_API_KEY", "")),
         allow_no_auth=bool(overrides.get("allow_no_auth", _bool_env("CLAUDE_GATEWAY_ALLOW_NO_AUTH", False))),
+        debug=bool(overrides.get("debug", _bool_env("CLAUDE_GATEWAY_DEBUG", False))),
         cors_origins=tuple(overrides.get("cors_origins") or _csv_env("CLAUDE_GATEWAY_CORS_ORIGINS")),
         model_name=str(overrides.get("model_name") or os.getenv("CLAUDE_GATEWAY_MODEL_NAME", DEFAULT_MODEL_NAME)),
         claude_bin=str(overrides.get("claude_bin") or os.getenv("CLAUDE_GATEWAY_CLAUDE_BIN", "claude")),

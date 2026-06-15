@@ -14,7 +14,7 @@ async def test_chat_completions_sse(client, auth_headers, monkeypatch):
     text = await resp.text()
     assert '"delta":{"role":"assistant"}' in text
     assert '"content":"alpha ' in text
-    assert '"cache_read_input_tokens":7' in text
+    assert '"claude_gateway"' not in text
     assert "data: [DONE]" in text
 
 

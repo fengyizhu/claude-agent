@@ -48,6 +48,15 @@ You can also use the helper script:
 CLAUDE_GATEWAY_API_KEY=dev-secret scripts/dev_server.sh
 ```
 
+Enable DEBUG-level gateway logs with:
+
+```bash
+CLAUDE_GATEWAY_DEBUG=1 \
+CLAUDE_GATEWAY_API_KEY=dev-secret \
+CLAUDE_GATEWAY_CLAUDE_ARGS='--dangerously-skip-permissions' \
+python -m claude_gateway.server
+```
+
 ## Configuration
 
 | Environment variable | Default | Description |
@@ -56,6 +65,7 @@ CLAUDE_GATEWAY_API_KEY=dev-secret scripts/dev_server.sh
 | `CLAUDE_GATEWAY_PORT` | `8765` | HTTP bind port |
 | `CLAUDE_GATEWAY_API_KEY` | unset | Bearer token required by API requests |
 | `CLAUDE_GATEWAY_ALLOW_NO_AUTH` | `false` | Allow running without API key for local tests only |
+| `CLAUDE_GATEWAY_DEBUG` | `false` | Enable DEBUG-level gateway logs |
 | `CLAUDE_GATEWAY_MODEL_NAME` | `claude-code` | Model name advertised by `/v1/models` |
 | `CLAUDE_GATEWAY_CLAUDE_BIN` | `claude` | Claude Code executable |
 | `CLAUDE_GATEWAY_CLAUDE_ARGS` | unset | Extra Claude Code args, e.g. `--dangerously-skip-permissions` |
